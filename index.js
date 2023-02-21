@@ -1,7 +1,6 @@
 // @version 0.0.6 新增 429 限频场景下的兼容
 import lark from "@larksuiteoapi/node-sdk";
 import express from "express";
-import axios from "axios";
 import "isomorphic-fetch";
 import path from "path";
 import bodyParser from "body-parser";
