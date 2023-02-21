@@ -6,10 +6,10 @@
     "out_file": "./logs/pm2_out.log",
     "pid_file": "./logs/pm2_node.pid",
     "env": {
-      "APPID": "",
-      "SECRET": "",
-      "BOTNAME": "",
-      "KEY": ""
+      "APPID": "cli_a379e3b82b79100e",
+      "SECRET": "5la9mAJ1qAgjpSPL4r6EGgA5iQLL67yL",
+      "BOTNAME": "魔坊bot",
+      "KEY": "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"
     }
   }
 ]

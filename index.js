@@ -1,25 +1,34 @@
 // @version 0.0.6 新增 429 限频场景下的兼容
-const lark = require("@larksuiteoapi/node-sdk");
-const axios = require("axios");
-const express = require("express");
-const app = express();
-const bodyParser = require("body-parser");
-const port = process.env.PROT || 9000;
-const sqlite3 = require("sqlite3");
-const sqlite = require("sqlite");
-
-const path = require("path"); // 引入路径处理模块
+import lark from "@larksuiteoapi/node-sdk";
+import express from "express";
+import axios from "axios";
+import "isomorphic-fetch";
+import path from "path";
+import bodyParser from "body-parser";
+import sqlite3 from "sqlite3";
+import { open } from "sqlite";
+import dotenv from "dotenv";
+const __dirname = path.resolve();
 const dbName = path.join(__dirname, "data.db");
 const tableName = "t_chatgpt_feishu_event";
+const app = express();
+dotenv.config();
 
+const port = process.env.PROT || 9000;
 // 如果你不想配置环境变量，或环境变量不生效，则可以把结果填写在每一行最后的 "" 内部
 const FEISHU_APP_ID = process.env.APPID || ""; // 飞书的应用 ID
 const FEISHU_APP_SECRET = process.env.SECRET || ""; // 飞书的应用的 Secret
 const FEISHU_BOTNAME = process.env.BOTNAME || ""; // 飞书机器人的名字
 const OPENAI_KEY = process.env.KEY || ""; // OpenAI 的 Key
 const OPENAI_MODEL = process.env.MODEL || "text-davinci-003"; // 使用的模型
-const OPENAI_MAX_TOKEN = process.env.MAX_TOKEN || 1024; // 最大 token 的值
-
+let api;
+(async () => {
+  const { ChatGPTAPI } = await import("chatgpt");
+  api = new ChatGPTAPI({
+    apiKey: OPENAI_KEY,
+    debug: false,
+  });
+})();
 const client = new lark.Client({
   appId: FEISHU_APP_ID,
   appSecret: FEISHU_APP_SECRET,
@@ -30,6 +39,12 @@ const client = new lark.Client({
 function logger(param) {
   console.warn(`[CF]`, param);
 }
+
+const delay = (ms) => {
+  return new Promise((resolve) => {
+    setTimeout(() => resolve(true), ms);
+  });
+};
 
 // 回复消息
 async function reply(messageId, content) {
@@ -50,65 +65,33 @@ async function reply(messageId, content) {
   }
 }
 
-// 根据中英文设置不同的 prompt
-function getPrompt(content) {
-  if (content.length === 0) {
-    return "";
-  }
-  if (
-    (content[0] >= "a" && content[0] <= "z") ||
-    (content[0] >= "A" && content[0] <= "Z")
-  ) {
-    return (
-      "You are ChatGPT, a LLM model trained by OpenAI. \nplease answer my following question\nQ: " +
-      content +
-      "\nA: "
-    );
-  }
-
-  return (
-    "你是 ChatGPT, 一个由 OpenAI 训练的大型语言模型, 你旨在回答并解决人们的任何问题，并且可以使用多种语言与人交流。\n请回答我下面的问题\nQ: " +
-    content +
-    "\nA: "
-  );
-}
-
+const conversationPool = {};
+const retryPool = {};
 // 通过 OpenAI API 获取回复
-async function getOpenAIReply(content) {
-  var prompt = getPrompt(content.trim());
-
-  var data = JSON.stringify({
-    model: OPENAI_MODEL,
-    prompt: prompt,
-    max_tokens: OPENAI_MAX_TOKEN,
-    temperature: 0.9,
-    frequency_penalty: 0.0,
-    presence_penalty: 0.0,
-    top_p: 1,
-    stop: ["#"],
-  });
-
-  var config = {
-    method: "post",
-    maxBodyLength: Infinity,
-    url: "https://api.openai.com/v1/completions",
-    headers: {
-      Authorization: `Bearer ${OPENAI_KEY}`,
-      "Content-Type": "application/json",
-    },
-    data: data,
-  };
-
+async function getOpenAIReply(talkerId, content) {
+  const prompt = content.trim();
+  retryPool[talkerId] = 1;
   try {
-    const response = await axios(config);
+    const conversation = conversationPool[talkerId];
+    const response = await api.sendMessage(prompt, {
+      conversationId: conversation?.conversationId,
+      parentMessageId: conversation?.messageId,
+      timeoutMs: 2 * 60 * 1000,
+    });
 
-    if (response.status === 429) {
-      return "请求过于频繁，请稍后再试";
-    }
+    conversationPool[talkerId] = {
+      messageId: response.id,
+      conversationId: response.conversationId,
+    };
     // 去除多余的换行
-    return response.data.choices[0].text.replace("\n\n", "");
+    return response.text.replace("\n\n", "");
   } catch (e) {
-    logger("请求openai接口失败", e);
+    if (retryPool[talkerId]) {
+      delete retryPool[talkerId];
+      console.log("retry...", e);
+      await delay(1000);
+      return getOpenAIReply(talkerId, content);
+    }
     return "请求失败";
   }
 }
@@ -190,7 +173,6 @@ function doctor() {
     meta: {
       FEISHU_APP_ID,
       OPENAI_MODEL,
-      OPENAI_MAX_TOKEN,
       FEISHU_BOTNAME,
     },
   };
@@ -205,7 +187,7 @@ app.get("/", async (req, resp) => {
 
 // 检查是否存在回调事件
 const checkHasEvent = async (eventId) => {
-  const db = await sqlite.open({
+  const db = await open({
     filename: dbName,
     driver: sqlite3.cached.Database,
   });
@@ -215,7 +197,7 @@ const checkHasEvent = async (eventId) => {
     const createSql = `
     CREATE TABLE if not exists ${tableName}(
     id INTEGER PRIMARY KEY,
-    event_id VARCHAR (40) NOT NULL)`;
+    event_id constCHAR (40) NOT NULL)`;
 
     await db.run(createSql);
     const rows = await db.all(
@@ -233,15 +215,13 @@ const checkHasEvent = async (eventId) => {
 };
 
 app.post("/", async (req, resp, context) => {
-  // console.dir(req);
   let params = req.body;
   if (typeof req.params !== "object") {
     const sJson = JSON.stringify(req.body);
-    const jsondata = JSON.parse(sJson);
-    const buf = new Buffer.from(jsondata);
+    const jsonData = JSON.parse(sJson);
+    const buf = new Buffer.from(jsonData);
     const data = buf.toString();
     if (data) {
-      console.log("jsondata", jsondata);
       const json = JSON.parse(data);
       params = json;
       console.log("json", json);
@@ -250,8 +230,6 @@ app.post("/", async (req, resp, context) => {
     }
   }
 
-  // console.log("req", req);
-  // console.log("params", params);
   const callback = (msg) => {
     resp.setHeader("Content-Type", "application/json");
     msg.challenge = params.challenge;
@@ -286,24 +264,27 @@ app.post("/", async (req, resp, context) => {
   }
   // 处理飞书开放平台的事件回调
   if (params.header.event_type === "im.message.receive_v1") {
-    let eventId = params.header.event_id;
-    let messageId = params.event.message.message_id;
-
+    const eventId = params.header.event_id;
+    const messageId = params.event.message.message_id;
+    const chatType = params.event.message.chat_type;
+    const chatId = params.event.message.chat_id; // 用户群组ID'
+    const senderId = params.event.message.sender.sender_id.union_id;
+    const talkerId = chatType === "p2p" ? senderId : chatId;
     const hasEvent = await checkHasEvent(eventId);
     if (hasEvent) {
       callback({ code: 1 });
       return;
     }
 
-    const replyMsg = async (question) => {
+    const replyMsg = async (talkerId, question) => {
       console.log("question:", question);
-      const openaiResponse = await getOpenAIReply(question);
-      console.log("openaiResponse:", openaiResponse);
-      await reply(messageId, openaiResponse);
+      const chatResponse = await getOpenAIReply(talkerId, question);
+      console.log("chatResponse:", chatResponse);
+      await reply(messageId, chatResponse);
     };
 
     // 私聊直接回复
-    if (params.event.message.chat_type === "p2p") {
+    if (chatType === "p2p") {
       // 不是文本消息，不处理
       if (params.event.message.message_type != "text") {
         await reply(messageId, "暂不支持其他类型的提问");
@@ -321,7 +302,7 @@ app.post("/", async (req, resp, context) => {
     }
 
     // 群聊，需要 @ 机器人
-    if (params.event.message.chat_type === "group") {
+    if (chatType === "group") {
       // 这是日常群沟通，不用管
       if (
         !params.event.message.mentions ||
@@ -339,7 +320,7 @@ app.post("/", async (req, resp, context) => {
       }
       const userInput = JSON.parse(params.event.message.content);
       const question = userInput.text.replace("@_user_1", "");
-      replyMsg(question);
+      replyMsg(talkerId, question);
       callback({ code: 0 });
       return;
     }
@@ -351,5 +332,5 @@ app.post("/", async (req, resp, context) => {
 });
 
 app.listen(port, () => {
-  console.log(`Example app listening on port ${port}`);
+  console.log(`Chat app listening on port ${port}`);
 });
