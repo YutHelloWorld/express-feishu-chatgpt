@@ -268,7 +268,7 @@ app.post("/", async (req, resp, context) => {
     const messageId = params.event.message.message_id;
     const chatType = params.event.message.chat_type;
     const chatId = params.event.message.chat_id; // 用户群组ID'
-    const senderId = params.event.message.sender.sender_id.union_id;
+    const senderId = params.event.sender.sender_id.union_id;
     const talkerId = chatType === "p2p" ? senderId : chatId;
     const hasEvent = await checkHasEvent(eventId);
     if (hasEvent) {
@@ -296,7 +296,7 @@ app.post("/", async (req, resp, context) => {
       const userInput = JSON.parse(params.event.message.content);
       const question = userInput.text.replace("@_user_1", "");
 
-      replyMsg(question);
+      replyMsg(talkerId, question);
       callback({ code: 0 });
       return;
     }
